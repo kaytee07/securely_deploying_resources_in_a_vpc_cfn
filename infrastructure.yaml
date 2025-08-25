@@ -1,27 +1,37 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  VPC with Public & Private Subnets, NAT Gateway, Internet Gateway,
-  Apache Web Server in Public Subnet, Private EC2 in Private Subnet,
-  both accessible with Systems Manager Session Manager.
+Description: "VPC with public/private subnets, NAT Gateway, and EC2 instances with Session Manager access"
 
 Parameters:
   VpcCIDR:
     Type: String
-    Default: "10.0.0.0/16"
+    Default: 10.0.0.0/16
+
   PublicSubnetCIDR:
     Type: String
-    Default: "10.0.1.0/24"
+    Default: 10.0.1.0/24
+
   PrivateSubnetCIDR:
     Type: String
-    Default: "10.0.2.0/24"
+    Default: 10.0.2.0/24
+
   InstanceType:
     Type: String
-    Default: "t2.micro"
+    Default: t2.micro
+
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: EC2 KeyPair (for backup SSH access)
+    Description: Name of an existing EC2 KeyPair
+
+  # ✅ Correct SSM parameter usage
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
 
 Resources:
+
+  # -------------------
+  # Networking
+  # -------------------
   MyVPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -30,14 +40,10 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: "LabVPC"
+          Value: MyVPC
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: "LabIGW"
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -52,35 +58,25 @@ Resources:
       CidrBlock: !Ref PublicSubnetCIDR
       MapPublicIpOnLaunch: true
       AvailabilityZone: !Select [0, !GetAZs ""]
-      Tags:
-        - Key: Name
-          Value: "PublicSubnet"
 
   PrivateSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref MyVPC
       CidrBlock: !Ref PrivateSubnetCIDR
-      MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [1, !GetAZs ""]
-      Tags:
-        - Key: Name
-          Value: "PrivateSubnet"
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref MyVPC
-      Tags:
-        - Key: Name
-          Value: "PublicRouteTable"
 
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
     Properties:
       RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: "0.0.0.0/0"
+      DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
   PublicSubnetRouteTableAssociation:
@@ -89,7 +85,7 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
-  EIP:
+  ElasticIP:
     Type: AWS::EC2::EIP
     Properties:
       Domain: vpc
@@ -97,25 +93,19 @@ Resources:
   NatGateway:
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt EIP.AllocationId
+      AllocationId: !GetAtt ElasticIP.AllocationId
       SubnetId: !Ref PublicSubnet
-      Tags:
-        - Key: Name
-          Value: "LabNAT"
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref MyVPC
-      Tags:
-        - Key: Name
-          Value: "PrivateRouteTable"
 
   PrivateRoute:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: "0.0.0.0/0"
+      DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway
 
   PrivateSubnetRouteTableAssociation:
@@ -124,60 +114,70 @@ Resources:
       SubnetId: !Ref PrivateSubnet
       RouteTableId: !Ref PrivateRouteTable
 
-  InstanceSG:
+  # -------------------
+  # Security Groups
+  # -------------------
+  PublicSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP and SSM
+      GroupDescription: Allow HTTP/SSH
       VpcId: !Ref MyVPC
       SecurityGroupIngress:
         - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: "0.0.0.0/0"
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: "0.0.0.0/0"
+          CidrIp: 0.0.0.0/0
 
-  WebServer:
+  PrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private SG
+      VpcId: !Ref MyVPC
+
+  # -------------------
+  # EC2 Instances
+  # -------------------
+  PublicInstance:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref InstanceType
-      SubnetId: !Ref PublicSubnet
-      ImageId: !Ref AWS::SSM::Parameter::Value::AWS::EC2::Image::Id /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-      SecurityGroupIds:
-        - !Ref InstanceSG
       KeyName: !Ref KeyName
-      Tags:
-        - Key: Name
-          Value: "PublicWebServer"
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref PublicSG
       UserData:
-        Fn::Base64: !Sub |
+        Fn::Base64: |
           #!/bin/bash
-          yum update -y
           yum install -y httpd
           systemctl enable httpd
           systemctl start httpd
-          echo "Hello, this is ${AWS::StackName} - YOUR_FULL_NAME" > /var/www/html/index.html
+          echo "Hello, I am Kofi Taylor" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: PublicWebServer
 
-  PrivateServer:
+  PrivateInstance:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref InstanceType
-      SubnetId: !Ref PrivateSubnet
-      ImageId: !Ref AWS::SSM::Parameter::Value::AWS::EC2::Image::Id /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-      SecurityGroupIds:
-        - !Ref InstanceSG
       KeyName: !Ref KeyName
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref PrivateSG
       Tags:
         - Key: Name
-          Value: "PrivateServer"
+          Value: PrivateServer
 
 Outputs:
-  WebServerPublicIP:
-    Description: Public IP of Web Server
-    Value: !GetAtt WebServer.PublicIp
-  WebServerURL:
-    Description: Web Server URL
-    Value: !Sub "http://${WebServer.PublicDnsName}"
+  PublicWebURL:
+    Description: "Public URL of the Web Server"
+    Value: !Sub "http://${PublicInstance.PublicDnsName}"
+
 
 
