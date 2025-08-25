@@ -1,37 +1,27 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Lab - VPC with Public & Private Subnets, EC2 Instances, Apache Web Server, SSM
+Description: >
+  VPC with Public & Private Subnets, NAT Gateway, Internet Gateway,
+  Apache Web Server in Public Subnet, Private EC2 in Private Subnet,
+  both accessible with Systems Manager Session Manager.
 
 Parameters:
   VpcCIDR:
     Type: String
-    Default: 10.0.0.0/16
-
+    Default: "10.0.0.0/16"
   PublicSubnetCIDR:
     Type: String
-    Default: 10.0.1.0/24
-
+    Default: "10.0.1.0/24"
   PrivateSubnetCIDR:
     Type: String
-    Default: 10.0.2.0/24
-
-  AZ1:
-    Type: AWS::EC2::AvailabilityZone::Name
-    Default: !Select [0, !GetAZs ""]
-
-  AZ2:
-    Type: AWS::EC2::AvailabilityZone::Name
-    Default: !Select [1, !GetAZs ""]
-
+    Default: "10.0.2.0/24"
   InstanceType:
     Type: String
-    Default: t3.micro
-
+    Default: "t2.micro"
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Default: MyKeyPair
+    Description: EC2 KeyPair (for backup SSH access)
 
 Resources:
-  ### VPC ###
   MyVPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -40,38 +30,14 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: LabVPC
+          Value: "LabVPC"
 
-  ### Subnets ###
-  PublicSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref MyVPC
-      CidrBlock: !Ref PublicSubnetCIDR
-      AvailabilityZone: !Ref AZ1
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: PublicSubnet
-
-  PrivateSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref MyVPC
-      CidrBlock: !Ref PrivateSubnetCIDR
-      AvailabilityZone: !Ref AZ2
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: PrivateSubnet
-
-  ### Internet Gateway ###
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: LabIGW
+          Value: "LabIGW"
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -79,30 +45,42 @@ Resources:
       VpcId: !Ref MyVPC
       InternetGatewayId: !Ref InternetGateway
 
-  ### NAT Gateway ###
-  NatEIP:
-    Type: AWS::EC2::EIP
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
     Properties:
-      Domain: vpc
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: "PublicSubnet"
 
-  NatGateway:
-    Type: AWS::EC2::NatGateway
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
     Properties:
-      AllocationId: !GetAtt NatEIP.AllocationId
-      SubnetId: !Ref PublicSubnet
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PrivateSubnetCIDR
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: "PrivateSubnet"
 
-  ### Route Tables ###
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: "PublicRouteTable"
 
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
     Properties:
       RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
+      DestinationCidrBlock: "0.0.0.0/0"
       GatewayId: !Ref InternetGateway
 
   PublicSubnetRouteTableAssociation:
@@ -111,16 +89,33 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: "LabNAT"
+
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: "PrivateRouteTable"
 
   PrivateRoute:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
+      DestinationCidrBlock: "0.0.0.0/0"
       NatGatewayId: !Ref NatGateway
 
   PrivateSubnetRouteTableAssociation:
@@ -129,134 +124,60 @@ Resources:
       SubnetId: !Ref PrivateSubnet
       RouteTableId: !Ref PrivateRouteTable
 
-  ### Security Groups ###
-  WebServerSG:
+  InstanceSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      GroupDescription: Allow HTTP and SSM
       VpcId: !Ref MyVPC
-      GroupDescription: Allow HTTP and outbound HTTPS
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: "0.0.0.0/0"
       SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
 
-  PrivateInstanceSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref MyVPC
-      GroupDescription: Private instance SSM only
-      SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-
-  EndpointSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref MyVPC
-      GroupDescription: SG for SSM Endpoints
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref WebServerSG
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref PrivateInstanceSG
-
-  ### IAM Role for SSM ###
-  SSMRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-  SSMInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [!Ref SSMRole]
-
-  ### Public EC2 (Apache Web Server) ###
-  PublicEC2:
+  WebServer:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref InstanceType
       SubnetId: !Ref PublicSubnet
-      ImageId: !Ref AWS::SSM::Parameter::Value<AWS::EC2::Image::Id> /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-      SecurityGroupIds: [!Ref WebServerSG]
-      IamInstanceProfile: !Ref SSMInstanceProfile
+      ImageId: !Ref AWS::SSM::Parameter::Value::AWS::EC2::Image::Id /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+      SecurityGroupIds:
+        - !Ref InstanceSG
       KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: "PublicWebServer"
       UserData:
-        Fn::Base64: |
+        Fn::Base64: !Sub |
           #!/bin/bash
           yum update -y
           yum install -y httpd
           systemctl enable httpd
           systemctl start httpd
-          echo "Hello from Your Full Name" > /var/www/html/index.html
-      Tags:
-        - Key: Name
-          Value: PublicWebServer
+          echo "Hello, this is ${AWS::StackName} - YOUR_FULL_NAME" > /var/www/html/index.html
 
-  ### Private EC2 ###
-  PrivateEC2:
+  PrivateServer:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref InstanceType
       SubnetId: !Ref PrivateSubnet
-      ImageId: !Ref AWS::SSM::Parameter::Value<AWS::EC2::Image::Id> /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-      SecurityGroupIds: [!Ref PrivateInstanceSG]
-      IamInstanceProfile: !Ref SSMInstanceProfile
+      ImageId: !Ref AWS::SSM::Parameter::Value::AWS::EC2::Image::Id /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+      SecurityGroupIds:
+        - !Ref InstanceSG
       KeyName: !Ref KeyName
       Tags:
         - Key: Name
-          Value: PrivateInstance
-
-  ### VPC Endpoints for SSM ###
-  SSMMessagesEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
-      VpcId: !Ref MyVPC
-      VpcEndpointType: Interface
-      SubnetIds: [!Ref PrivateSubnet, !Ref PublicSubnet]
-      SecurityGroupIds: [!Ref EndpointSG]
-
-  SSMMEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
-      VpcId: !Ref MyVPC
-      VpcEndpointType: Interface
-      SubnetIds: [!Ref PrivateSubnet, !Ref PublicSubnet]
-      SecurityGroupIds: [!Ref EndpointSG]
-
-  EC2MessagesEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
-      VpcId: !Ref MyVPC
-      VpcEndpointType: Interface
-      SubnetIds: [!Ref PrivateSubnet, !Ref PublicSubnet]
-      SecurityGroupIds: [!Ref EndpointSG]
+          Value: "PrivateServer"
 
 Outputs:
-  PublicWebURL:
-    Description: URL of the Apache Web Server
-    Value: !Sub "http://${PublicEC2.PublicDnsName}"
+  WebServerPublicIP:
+    Description: Public IP of Web Server
+    Value: !GetAtt WebServer.PublicIp
+  WebServerURL:
+    Description: Web Server URL
+    Value: !Sub "http://${WebServer.PublicDnsName}"
+
 
